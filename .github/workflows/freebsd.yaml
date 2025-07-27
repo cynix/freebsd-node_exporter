@@ -1,0 +1,77 @@
+name: FreeBSD
+
+on:
+  workflow_dispatch:
+
+jobs:
+  calculate:
+    name: Get latest tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.calculate.outputs.tag }}
+      version: ${{ steps.calculate.outputs.version }}
+    steps:
+      - id: calculate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --repo=prometheus/node_exporter --limit=1 --json=tagName --jq='.[0].tagName')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: calculate
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: prometheus/node_exporter
+          ref: ${{ needs.calculate.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          check-latest: true
+
+      - name: Build
+        run: |
+          docker run --pull=always --rm -v $(pwd):/work -w /work -e BUILDER_UID=$(id -u) -e BUILDER_GID=$(id -g) -e BUILDER_USER=$(id -un) -e BUILDER_GROUP=$(id -gn) -e FREEBSD_TARGET=${{ matrix.arch }} ghcr.io/cynix/dockcross-freebsd env GOOS=freebsd GOARCH=${{ matrix.arch }} make common-build common-tarball
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node_exporter-${{ needs.calculate.outputs.version }}.freebsd-${{ matrix.arch }}.tar.gz
+          path: node_exporter-${{ needs.calculate.outputs.version }}.freebsd-${{ matrix.arch }}.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [calculate, build]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          gh release delete --cleanup-tag --yes ${{ needs.calculate.outputs.tag }} || true
+          gh release create --latest=true --notes=${{ needs.calculate.outputs.tag }} --title=${{ needs.calculate.outputs.tag }} ${{ needs.calculate.outputs.tag }} ./node_exporter-*.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
